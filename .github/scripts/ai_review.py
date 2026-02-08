@@ -89,7 +89,21 @@ def review_with_gemini(prompt):
     
     try:
         from google import genai
-        client = genai.Client(api_key=api_key)
+        from google.genai import types
+
+        proxy_url = "http://127.0.0.1:10808"
+        os.environ["HTTP_PROXY"] = proxy_url
+        os.environ["HTTPS_PROXY"] = proxy_url
+        os.environ["http_proxy"] = proxy_url
+        os.environ["https_proxy"] = proxy_url
+        # -----------------------
+        client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(
+        client_args={'proxy': proxy_url},
+        async_client_args={'proxy': proxy_url}
+        )
+        )
         response = client.models.generate_content(
             model=model,
             contents=prompt

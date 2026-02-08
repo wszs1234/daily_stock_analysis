@@ -496,8 +496,10 @@ class GeminiAnalyzer:
         """
         config = get_config()
         self._api_key = api_key or config.gemini_api_key
-        self._model = None
+        # google-genai 新版 SDK：使用 Client 实例而不是全局 configure + GenerativeModel
+        self._gemini_client = None  # type: ignore[assignment]
         self._current_model_name = None  # 当前使用的模型名称
+        self._fallback_model_name = None  # 备选模型名称
         self._using_fallback = False  # 是否正在使用备选模型
         self._use_openai = False  # 是否使用 OpenAI 兼容 API
         self._openai_client = None  # OpenAI 客户端
@@ -518,7 +520,7 @@ class GeminiAnalyzer:
             self._init_openai_fallback()
         
         # 两者都未配置
-        if not self._model and not self._openai_client:
+        if not self._gemini_client and not self._openai_client:
             logger.warning("未配置任何 AI API Key，AI 分析功能将不可用")
     
     def _init_openai_fallback(self) -> None:
@@ -576,49 +578,46 @@ class GeminiAnalyzer:
     
     def _init_model(self) -> None:
         """
-        初始化 Gemini 模型
+        初始化 Gemini 客户端（google-genai 新版 SDK）
         
         配置：
-        - 使用 gemini-3-flash-preview 或 gemini-2.5-flash 模型
+        - 使用 gemini-3-flash-preview 或 gemini-2.5-flash 等模型
         - 不启用 Google Search（使用外部 Tavily/SerpAPI 搜索）
         """
         try:
-            import google.generativeai as genai
+            # 延迟导入，避免未安装 google-genai 时直接报错
+            from google import genai
+            from google.genai import types
+            from dotenv import load_dotenv
+            # 初始化 Gemini 客户端
+            import os
+            load_dotenv()
             
-            # 配置 API Key
-            genai.configure(api_key=self._api_key)
             
+            # 仅对 Gemini 客户端传代理，不设置全局 HTTP_PROXY，避免 Tushare/腾讯/新浪等国内接口也走代理
+            proxy_url = os.getenv("GEMINI_PROXY_URL", "socks5h://127.0.0.1:10808")
+            client = genai.Client(
+                api_key=self._api_key,
+                http_options=types.HttpOptions(
+                    client_args={"proxy": proxy_url} if proxy_url else {},
+                    async_client_args={"proxy": proxy_url} if proxy_url else {},
+                )
+            )
+            self._gemini_client = client
             # 从配置获取模型名称
             config = get_config()
             model_name = config.gemini_model
             fallback_model = config.gemini_model_fallback
             
-            # 不再使用 Google Search Grounding（已知有兼容性问题）
-            # 改为使用外部搜索服务（Tavily/SerpAPI）预先获取新闻
-            
-            # 尝试初始化主模型
-            try:
-                self._model = genai.GenerativeModel(
-                    model_name=model_name,
-                    system_instruction=self.SYSTEM_PROMPT,
-                )
-                self._current_model_name = model_name
-                self._using_fallback = False
-                logger.info(f"Gemini 模型初始化成功 (模型: {model_name})")
-            except Exception as model_error:
-                # 尝试备选模型
-                logger.warning(f"主模型 {model_name} 初始化失败: {model_error}，尝试备选模型 {fallback_model}")
-                self._model = genai.GenerativeModel(
-                    model_name=fallback_model,
-                    system_instruction=self.SYSTEM_PROMPT,
-                )
-                self._current_model_name = fallback_model
-                self._using_fallback = True
-                logger.info(f"Gemini 备选模型初始化成功 (模型: {fallback_model})")
+            # 记录当前模型信息，真正调用时通过 models.generate_content 传入
+            self._current_model_name = model_name
+            self._fallback_model_name = fallback_model
+            self._using_fallback = False
+            logger.info(f"Gemini 客户端初始化成功 (模型: {model_name}, 备选: {fallback_model})")
             
         except Exception as e:
-            logger.error(f"Gemini 模型初始化失败: {e}")
-            self._model = None
+            logger.error(f"Gemini 客户端初始化失败: {e}")
+            self._gemini_client = None
     
     def _switch_to_fallback_model(self) -> bool:
         """
@@ -628,18 +627,21 @@ class GeminiAnalyzer:
             是否成功切换
         """
         try:
-            import google.generativeai as genai
             config = get_config()
-            fallback_model = config.gemini_model_fallback
+            fallback_model = self._fallback_model_name or config.gemini_model_fallback
+            
+            # 如果客户端尚未初始化，尝试重新初始化
+            if not self._gemini_client:
+                self._init_model()
+            
+            if not self._gemini_client:
+                logger.error("[LLM] 无法切换备选模型：Gemini 客户端未初始化")
+                return False
             
             logger.warning(f"[LLM] 切换到备选模型: {fallback_model}")
-            self._model = genai.GenerativeModel(
-                model_name=fallback_model,
-                system_instruction=self.SYSTEM_PROMPT,
-            )
             self._current_model_name = fallback_model
             self._using_fallback = True
-            logger.info(f"[LLM] 备选模型 {fallback_model} 初始化成功")
+            logger.info(f"[LLM] 备选模型 {fallback_model} 启用成功")
             return True
         except Exception as e:
             logger.error(f"[LLM] 切换备选模型失败: {e}")
@@ -647,7 +649,7 @@ class GeminiAnalyzer:
     
     def is_available(self) -> bool:
         """检查分析器是否可用"""
-        return self._model is not None or self._openai_client is not None
+        return self._gemini_client is not None or self._openai_client is not None
     
     def _call_openai_api(self, prompt: str, generation_config: dict) -> str:
         """
@@ -740,10 +742,26 @@ class GeminiAnalyzer:
                     logger.info(f"[Gemini] 第 {attempt + 1} 次重试，等待 {delay:.1f} 秒...")
                     time.sleep(delay)
                 
-                response = self._model.generate_content(
-                    prompt,
-                    generation_config=generation_config,
-                    request_options={"timeout": 120}
+                # 使用 google-genai 新版 SDK 的客户端调用
+                if not self._gemini_client:
+                    raise RuntimeError("Gemini 客户端未初始化")
+
+                try:
+                    from google.genai import types as genai_types
+                except ImportError:
+                    # 明确提示未安装新版 SDK
+                    raise ImportError("未安装 google-genai，请运行: pip install google-genai>=0.1.0")
+
+                gen_config = genai_types.GenerateContentConfig(
+                    temperature=generation_config.get("temperature"),
+                    max_output_tokens=generation_config.get("max_output_tokens"),
+                    system_instruction=self.SYSTEM_PROMPT,
+                )
+
+                response = self._gemini_client.models.generate_content(
+                    model=self._current_model_name,
+                    contents=prompt,
+                    config=gen_config,
                 )
                 
                 if response and response.text:

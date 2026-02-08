@@ -1,0 +1,26 @@
+# run_new.py (Streamlit) 专用镜像（国内用华为云镜像加速）
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.11-slim
+
+WORKDIR /app
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# 安装依赖（关闭进度条避免 Docker 构建时线程限制报错）
+COPY requirements.txt .
+ENV PIP_PROGRESS_BAR=off
+RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && pip config set global.trusted-host mirrors.aliyun.com && pip install --no-cache-dir -r requirements.txt --default-timeout=300
+
+# 复制代码
+COPY *.py ./
+COPY data_provider/ ./data_provider/
+COPY web/ ./web/
+COPY bot/ ./bot/
+COPY src/ ./src/
+COPY .streamlit/ ./.streamlit/
+
+RUN mkdir -p /app/data
+
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8501
+CMD ["streamlit", "run", "run_new.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true", "--server.fileWatcherType=none"]

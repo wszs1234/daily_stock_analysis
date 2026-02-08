@@ -1,0 +1,21 @@
+# run_new.py Streamlit 应用
+# 使用: docker-compose -f docker/docker-compose.run_new.yml up -d
+
+version: '3.8'
+
+services:
+  run_new:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.run_new
+    container_name: stock-run-new
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ../data:/app/data
+      - ../.env:/app/.env
+    # host 网络：可直接使用宿主机 127.0.0.1:10808 代理，应用监听 8501
+    network_mode: host

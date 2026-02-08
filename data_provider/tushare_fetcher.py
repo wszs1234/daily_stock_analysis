@@ -101,11 +101,11 @@ class TushareFetcher(BaseFetcher):
         try:
             import tushare as ts
             
-            # 设置 Token
-            ts.set_token(config.tushare_token)
-            
-            # 获取 API 实例
-            self._api = ts.pro_api()
+            token = config.tushare_token
+            pro = ts.pro_api(token)
+            pro._DataApi__token = token  # 保证有此代码，否则无法正确鉴权
+            pro._DataApi__http_url = "http://lianghua.nanyangqiankun.top"  # 自定义 API 代理/镜像
+            self._api = pro
             
             logger.info("Tushare API 初始化成功")
             
